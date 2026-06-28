@@ -155,6 +155,7 @@ class AutoTestService : Service() {
                     val aligned = faceDetector.alignFace(cropped, face)
                     if (embeddingExtractor.isReady()) {
                         val emb = embeddingExtractor.extract(aligned)
+                        fileLog("    embedding: ${if (emb != null) "OK len=${emb.size}" else "NULL"}")
                         if (emb != null) {
                             val r = face.boundingBox
                             db.faceEmbeddingDao().insert(FaceEmbeddingEntity(
@@ -177,6 +178,25 @@ class AutoTestService : Service() {
         sb.appendLine("成功: ${processed-errors}/$processed, 出错: $errors")
         sb.appendLine("人脸: $totalFaces")
         sb.appendLine("耗时: ${"%.1f".format(elapsed)}s (${"%.2f".format(if(processed>0) elapsed/processed else 0.0)}s/张)")
+
+        // DBSCAN 聚类
+        fileLog("Checking clustering: isReady=${embeddingExtractor.isReady()} embCount=${db.faceEmbeddingDao().count()}")
+        if (embeddingExtractor.isReady() && db.faceEmbeddingDao().count() > 0) {
+            sb.appendLine()
+            sb.appendLine("=== DBSCAN 聚类 ===")
+            val allEmb = db.faceEmbeddingDao().getAll()
+            sb.appendLine("特征总数: ${allEmb.size}")
+            fileLog("Clustering ${allEmb.size} embeddings...")
+
+            val embeddings = allEmb.map { it.embeddingRaw.split(",").map { v -> v.toFloat() }.toFloatArray() }
+            val result = DBSCANClustering.cluster(embeddings, eps = 0.4f, minPts = 2)
+            sb.appendLine("识别人物: ${result.clusterCount}")
+            sb.appendLine("噪声点: ${result.labels.count { it == -1 }}")
+            fileLog("Clusters: ${result.clusterCount}, noise: ${result.labels.count { it == -1 }}")
+            result.clusterSizes.entries.sortedByDescending { it.value }.forEach { (cid, cnt) ->
+                sb.appendLine("  Person_${cid + 1}: $cnt 张")
+            }
+        }
         return sb.toString()
     }
 
