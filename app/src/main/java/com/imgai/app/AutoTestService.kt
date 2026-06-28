@@ -12,7 +12,7 @@ import androidx.core.app.NotificationCompat
 import com.imgai.app.cluster.DBSCANClustering
 import com.imgai.app.data.AppDatabase
 import com.imgai.app.data.FaceEmbeddingEntity
-import com.imgai.app.data.ProcessedImageEntity
+import com.imgai.app.data.PhotoEntity
 import com.imgai.app.detect.FaceDetectorManager
 import com.imgai.app.detect.FaceEmbeddingExtractor
 import kotlinx.coroutines.CoroutineScope
@@ -68,14 +68,14 @@ class AutoTestService : Service() {
             try {
                 fileLog("Opening database...")
                 val db = AppDatabase.get(this@AutoTestService)
-                fileLog("Database OK, processed=${db.processedImageDao().count()}")
+                fileLog("Database OK, processed=${db.photoDao().count()}")
 
                 val report = when (action) {
                     "scan" -> doScan(db, days)
                     "process" -> doProcess(db, 0, days)
                     "test" -> doProcess(db, 0, if (days > 0) days else 7)
                     "reset" -> {
-                        db.processedImageDao().deleteAll()
+                        db.photoDao().deleteAll()
                         db.faceEmbeddingDao().deleteAll()
                         "数据库已清空"
                     }
@@ -109,7 +109,7 @@ class AutoTestService : Service() {
             sb.appendLine("最新: ${fmt.format(Date(photos.maxOf { it.dateTaken }))}")
             sb.appendLine("总大小: ${formatSize(totalSize)}")
         }
-        sb.appendLine("已处理: ${db.processedImageDao().count()}")
+        sb.appendLine("已处理: ${db.photoDao().count()}")
         sb.appendLine("人脸记录: ${db.faceEmbeddingDao().count()}")
         sb.appendLine("TFLite模型: ${if (embeddingExtractor.isReady()) "已加载" else "未找到"}")
         return sb.toString()
@@ -123,7 +123,7 @@ class AutoTestService : Service() {
         val photos = withContext(Dispatchers.IO) { getAllPhotos(daysBack) }
         fileLog("Got ${photos.size} photos")
 
-        val processedUris = db.processedImageDao().getAllUris().toSet()
+        val processedUris = db.photoDao().getAllUris().toSet()
         fileLog("Already processed: ${processedUris.size}")
 
         val newPhotos = photos.filter { it.uri !in processedUris }
@@ -172,9 +172,10 @@ class AutoTestService : Service() {
                         }
                     }
                 }
-                db.processedImageDao().upsert(ProcessedImageEntity(
-                    uri = photo.uri, processedAt = System.currentTimeMillis(),
-                    faceCount = faces.size, dateTaken = photo.dateTaken))
+                db.photoDao().upsert(PhotoEntity(
+                    uri = photo.uri,
+                    processedAt = System.currentTimeMillis(),
+                    dateTaken = photo.dateTaken))
                 bitmap.recycle()
                 if (faces.isNotEmpty()) sb.appendLine("  [${processed+1}] faces=${faces.size}")
             } catch (e: Exception) { errors++; fileLog("Err@$processed: ${e.message}") }
@@ -202,8 +203,19 @@ class AutoTestService : Service() {
             sb.appendLine("识别人物: ${result.clusterCount}")
             sb.appendLine("噪声点: ${result.labels.count { it == -1 }}")
             fileLog("Clusters: ${result.clusterCount}, noise: ${result.labels.count { it == -1 }}")
+
+            // 清旧聚类，写新的
+            db.faceClusterDao().deleteAll()
             result.clusterSizes.entries.sortedByDescending { it.value }.forEach { (cid, cnt) ->
-                sb.appendLine("  Person_${cid + 1}: $cnt 张")
+                val label = "Person_${cid + 1}"
+                sb.appendLine("  $label: $cnt 张")
+                // 创建聚类记录
+                val clusterId = db.faceClusterDao().insert(
+                    com.imgai.app.data.FaceClusterEntity(label = label, memberCount = cnt)
+                )
+                // 更新 embedding 的 clusterId
+                val embIds = allEmb.indices.filter { result.labels[it] == cid }.map { allEmb[it].id }
+                if (embIds.isNotEmpty()) db.faceEmbeddingDao().updateClusterIds(embIds, clusterId)
             }
         }
         return sb.toString()

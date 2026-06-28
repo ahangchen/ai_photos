@@ -3,17 +3,68 @@ package com.imgai.app.data
 import androidx.room.*
 
 @Dao
-interface ProcessedImageDao {
+interface CategoryDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(categories: List<CategoryEntity>)
+
+    @Query("SELECT * FROM categories ORDER BY sortOrder")
+    suspend fun getAll(): List<CategoryEntity>
+
+    @Query("SELECT * FROM categories WHERE name = :name LIMIT 1")
+    suspend fun getByName(name: String): CategoryEntity?
+}
+
+@Dao
+interface FaceClusterDao {
+    @Insert
+    suspend fun insert(cluster: FaceClusterEntity): Long
+
+    @Update
+    suspend fun update(cluster: FaceClusterEntity)
+
+    @Query("SELECT * FROM face_clusters ORDER BY memberCount DESC")
+    suspend fun getAll(): List<FaceClusterEntity>
+
+    @Query("SELECT * FROM face_clusters WHERE id = :id")
+    suspend fun getById(id: Long): FaceClusterEntity?
+
+    @Query("UPDATE face_clusters SET memberCount = :count WHERE id = :id")
+    suspend fun updateMemberCount(id: Long, count: Int)
+
+    @Query("DELETE FROM face_clusters")
+    suspend fun deleteAll()
+
+    @Query("SELECT COUNT(*) FROM face_clusters")
+    suspend fun count(): Int
+}
+
+@Dao
+interface PhotoDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(entity: ProcessedImageEntity)
+    suspend fun upsert(photo: PhotoEntity)
 
-    @Query("SELECT uri FROM processed_images")
-    suspend fun getAllUris(): List<String>
+    @Query("SELECT * FROM photos WHERE status = 'normal' ORDER BY dateTaken DESC")
+    suspend fun getAll(): List<PhotoEntity>
 
-    @Query("SELECT COUNT(*) FROM processed_images")
+    @Query("SELECT * FROM photos WHERE categoryId = :categoryId ORDER BY dateTaken DESC")
+    suspend fun getByCategory(categoryId: Long): List<PhotoEntity>
+
+    @Query("SELECT * FROM photos WHERE clusterId = :clusterId ORDER BY dateTaken DESC")
+    suspend fun getByCluster(clusterId: Long): List<PhotoEntity>
+
+    @Query("SELECT * FROM photos WHERE status = 'pending_review' ORDER BY dateTaken DESC")
+    suspend fun getPendingReview(): List<PhotoEntity>
+
+    @Query("SELECT COUNT(*) FROM photos")
     suspend fun count(): Int
 
-    @Query("DELETE FROM processed_images")
+    @Query("SELECT COUNT(*) FROM photos WHERE categoryId IS NOT NULL")
+    suspend fun countCategorized(): Int
+
+    @Query("SELECT uri FROM photos")
+    suspend fun getAllUris(): List<String>
+
+    @Query("DELETE FROM photos")
     suspend fun deleteAll()
 }
 
@@ -22,9 +73,6 @@ interface FaceEmbeddingDao {
     @Insert
     suspend fun insert(entity: FaceEmbeddingEntity): Long
 
-    @Insert
-    suspend fun insertAll(entities: List<FaceEmbeddingEntity>)
-
     @Query("SELECT * FROM face_embeddings")
     suspend fun getAll(): List<FaceEmbeddingEntity>
 
@@ -32,19 +80,10 @@ interface FaceEmbeddingDao {
     suspend fun count(): Int
 
     @Query("UPDATE face_embeddings SET clusterId = :clusterId WHERE id IN (:ids)")
-    suspend fun updateClusterIds(ids: List<Long>, clusterId: Int)
+    suspend fun updateClusterIds(ids: List<Long>, clusterId: Long)
 
     @Query("SELECT * FROM face_embeddings WHERE clusterId = :clusterId")
-    suspend fun getByCluster(clusterId: Int): List<FaceEmbeddingEntity>
-
-    @Query("SELECT DISTINCT clusterId FROM face_embeddings WHERE clusterId >= 0")
-    suspend fun getClusterIds(): List<Int>
-
-    @Query("SELECT COUNT(*) FROM face_embeddings WHERE clusterId >= 0")
-    suspend fun getClusteredCount(): Int
-
-    @Query("UPDATE face_embeddings SET clusterId = -1")
-    suspend fun resetClusters()
+    suspend fun getByCluster(clusterId: Long): List<FaceEmbeddingEntity>
 
     @Query("DELETE FROM face_embeddings")
     suspend fun deleteAll()
@@ -60,4 +99,7 @@ interface DuplicateGroupDao {
 
     @Query("SELECT * FROM duplicate_groups ORDER BY createdAt DESC")
     suspend fun getAll(): List<DuplicateGroupEntity>
+
+    @Query("DELETE FROM duplicate_groups")
+    suspend fun deleteAll()
 }
