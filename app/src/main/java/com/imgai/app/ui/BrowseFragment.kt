@@ -42,35 +42,31 @@ class BrowseFragment : Fragment() {
     private fun loadData() {
         viewLifecycleOwner.lifecycleScope.launch {
             val db = AppDatabase.get(requireContext())
-            val categories = withContext(Dispatchers.IO) { db.categoryDao().getAll() }
             val clusters = withContext(Dispatchers.IO) { db.faceClusterDao().getAll() }
+            val archivedCount = withContext(Dispatchers.IO) { db.faceClusterDao().countArchived() }
+            val archivedClusters = withContext(Dispatchers.IO) { db.faceClusterDao().getArchived() }
+            val unarchivedClusters = withContext(Dispatchers.IO) { db.faceClusterDao().getUnarchived() }
 
             val items = mutableListOf<CategoryItem>()
 
-            // 大类
-            for (cat in categories) {
-                val count = withContext(Dispatchers.IO) {
-                    db.photoDao().getByCategory(cat.id).size
+            // ── 已归档 ──
+            if (archivedClusters.isNotEmpty()) {
+                items.add(CategoryItem("📦 已归档", "", "header", -1, false))
+                for (cluster in archivedClusters) {
+                    items.add(CategoryItem(
+                        title = cluster.label,
+                        subtitle = "${cluster.memberCount} 张 → ${cluster.archivePath ?: ""}",
+                        type = "cluster",
+                        id = cluster.id,
+                        isClickable = true
+                    ))
                 }
-                items.add(CategoryItem(
-                    title = cat.name,
-                    subtitle = "${count} 张",
-                    type = "category",
-                    id = cat.id,
-                    isClickable = count > 0
-                ))
             }
 
-            // 人物子类
-            if (clusters.isNotEmpty()) {
-                items.add(CategoryItem(
-                    title = "── 人物明细 ──",
-                    subtitle = "",
-                    type = "divider",
-                    id = -1,
-                    isClickable = false
-                ))
-                for (cluster in clusters) {
+            // ── 未归档 ──
+            items.add(CategoryItem("📂 未归档", "", "header", -1, false))
+            if (unarchivedClusters.isNotEmpty()) {
+                for (cluster in unarchivedClusters) {
                     items.add(CategoryItem(
                         title = cluster.label,
                         subtitle = "${cluster.memberCount} 张",
@@ -79,6 +75,8 @@ class BrowseFragment : Fragment() {
                         isClickable = true
                     ))
                 }
+            } else {
+                items.add(CategoryItem("暂无聚类结果，请先在首页点击聚类", "", "empty", -1, false))
             }
 
             adapter.submitList(items)
@@ -98,7 +96,7 @@ class BrowseFragment : Fragment() {
     data class CategoryItem(
         val title: String,
         val subtitle: String,
-        val type: String,       // category / cluster / divider
+        val type: String,
         val id: Long,
         val isClickable: Boolean
     )
@@ -129,19 +127,19 @@ class BrowseFragment : Fragment() {
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
             (holder.itemView as TextView).apply {
-                text = when {
-                    item.type == "divider" -> item.title
-                    item.type == "cluster" -> "   👤 ${item.title}    ${item.subtitle}"
-                    else -> "📁 ${item.title}    ${item.subtitle}"
+                text = when (item.type) {
+                    "header" -> item.title
+                    "empty" -> item.title
+                    "cluster" -> "   👤 ${item.title}    ${item.subtitle}"
+                    else -> item.title
                 }
-                alpha = if (item.type == "divider") 0.4f else 1f
+                alpha = when (item.type) {
+                    "header" -> 0.6f
+                    "empty" -> 0.4f
+                    else -> 1f
+                }
                 isClickable = item.isClickable
-
-                setOnClickListener {
-                    if (item.isClickable) {
-                        onClick(item)
-                    }
-                }
+                setOnClickListener { if (item.isClickable) onClick(item) }
             }
         }
 

@@ -31,6 +31,18 @@ interface FaceClusterDao {
     @Query("UPDATE face_clusters SET memberCount = :count WHERE id = :id")
     suspend fun updateMemberCount(id: Long, count: Int)
 
+    @Query("UPDATE face_clusters SET archived = 1, archivePath = :path WHERE id = :id")
+    suspend fun archive(id: Long, path: String)
+
+    @Query("SELECT * FROM face_clusters WHERE archived = 1 ORDER BY label")
+    suspend fun getArchived(): List<FaceClusterEntity>
+
+    @Query("SELECT * FROM face_clusters WHERE archived = 0 ORDER BY memberCount DESC")
+    suspend fun getUnarchived(): List<FaceClusterEntity>
+
+    @Query("SELECT COUNT(*) FROM face_clusters WHERE archived = 1")
+    suspend fun countArchived(): Int
+
     @Query("DELETE FROM face_clusters")
     suspend fun deleteAll()
 

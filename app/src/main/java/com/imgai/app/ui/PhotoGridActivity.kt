@@ -160,7 +160,8 @@ class PhotoGridActivity : AppCompatActivity() {
                 exportProgress.progress = index + 1
             }
 
-            finishExport(moved, failed, moved > 0 && failed == 0)
+            val path = targetDir.absolutePath
+            finishExport(moved, failed, moved > 0 && failed == 0, path)
         }
     }
 
@@ -215,14 +216,28 @@ class PhotoGridActivity : AppCompatActivity() {
         }
     }
 
-    private fun finishExport(moved: Int, failed: Int, allMoved: Boolean) {
+    private fun finishExport(moved: Int, failed: Int, allMoved: Boolean, archivePath: String?) {
         btnExport.isEnabled = true
         exportProgress.visibility = View.GONE
 
         tvExportStatus.text = buildString {
             appendLine("✅ 移动完成: $moved 张")
             if (failed > 0) appendLine("❌ 失败: $failed 张")
+            if (archivePath != null && moved > 0) appendLine("📦 已归档到: $archivePath")
         }
+
+        // 标记 cluster 为已归档
+        if (moved > 0 && archivePath != null) {
+            val clusterId = intent.getLongExtra("id", -1)
+            val type = intent.getStringExtra("type")
+            if (type == "cluster" && clusterId >= 0) {
+                lifecycleScope.launch {
+                    val db = AppDatabase.get(this@PhotoGridActivity)
+                    db.faceClusterDao().archive(clusterId, archivePath)
+                }
+            }
+        }
+
         Toast.makeText(this, "已移动 $moved 张照片", Toast.LENGTH_LONG).show()
     }
 
