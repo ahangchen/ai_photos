@@ -195,17 +195,20 @@ class PhotoGridActivity : AppCompatActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                val intentSender = contentResolver.delete(
-                    uris[0],  // MediaStore.createDeleteRequest needs a collection
-                    null, null
-                )
-                // Android 11+ 使用 MediaStore.createDeleteRequest
                 val deleteRequest = MediaStore.createDeleteRequest(contentResolver, uris)
                 startIntentSenderForResult(deleteRequest.intentSender, 200, null, 0, 0, 0)
             } catch (e: Exception) {
                 Log.e(TAG, "Delete request failed", e)
+                // 删除请求失败，仍然提示用户复制成功
+                Toast.makeText(this, "原图删除失败，已保留原图", Toast.LENGTH_LONG).show()
                 finishExport(uris.size, 0, deleted = false)
             }
+        } else {
+            // Android 10 以下直接删除
+            for (uri in uris) {
+                try { contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            }
+            finishExport(uris.size, 0, deleted = true)
         }
     }
 
