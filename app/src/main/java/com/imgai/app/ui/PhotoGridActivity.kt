@@ -115,49 +115,47 @@ class PhotoGridActivity : AppCompatActivity() {
         exportProgress.max = toMove.size
         exportProgress.progress = 0
 
+        // Android 11+ 没有 createMoveRequest，只能复制+删除原图
+        // EXIF 数据（拍摄时间等）随图片数据一起复制，不会丢失
+        fallbackCopyAndDelete(targetDirUri, toMove)
+    }
+
+    /** 退回方案：SAF 复制 + MediaStore 删除原图 */
+    private fun fallbackCopyAndDelete(targetDirUri: Uri, toMove: List<String>) {
         lifecycleScope.launch {
             val targetDir = withContext(Dispatchers.IO) {
                 androidx.documentfile.provider.DocumentFile.fromTreeUri(this@PhotoGridActivity, targetDirUri)
-            }
-            if (targetDir == null || !targetDir.canWrite()) {
-                tvExportStatus.text = "❌ 无法写入目标目录"
+            } ?: run {
+                tvExportStatus.text = "❌ 无法访问目标目录"
                 btnExport.isEnabled = true
                 exportProgress.visibility = View.GONE
                 return@launch
             }
 
-            var moved = 0
+            var copied = 0
             var failed = 0
             val copiedUris = mutableListOf<Uri>()
 
             for ((index, uriStr) in toMove.withIndex()) {
                 val sourceUri = Uri.parse(uriStr)
-                tvExportStatus.text = "移动中: ${index + 1}/${toMove.size}"
+                tvExportStatus.text = "复制中: ${index + 1}/${toMove.size}"
 
                 try {
-                    val result = withContext(Dispatchers.IO) {
-                        moveViaSAF(sourceUri, targetDir)
-                    }
-                    if (result) {
-                        copiedUris.add(sourceUri)
-                        moved++
-                    } else {
-                        failed++
-                    }
+                    val ok = withContext(Dispatchers.IO) { moveViaSAF(sourceUri, targetDir) }
+                    if (ok) { copiedUris.add(sourceUri); copied++ } else { failed++ }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Move error", e)
                     failed++
                 }
-
                 exportProgress.progress = index + 1
             }
 
-            // 删除原图（通过 MediaStore.createDeleteRequest）
+            // 删除原图
             if (copiedUris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 tvExportStatus.text = "等待确认删除 ${copiedUris.size} 张原图..."
-                requestDeleteOriginals(copiedUris, moved, failed)
+                pendingDeleteCount = copied
+                requestDeleteOriginals(copiedUris, copied, failed)
             } else {
-                finishExport(moved, failed, deleted = false)
+                finishExport(copied, failed, deleted = false)
             }
         }
     }
