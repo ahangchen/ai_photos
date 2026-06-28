@@ -42,9 +42,7 @@ class PhotoGridActivity : AppCompatActivity() {
     private lateinit var adapter: PhotoAdapter
 
     private var photoUris: List<String> = emptyList()
-    private var pendingMoveItems: MutableList<MoveItem> = mutableListOf()
-
-    data class MoveItem(val sourceUri: Uri, val sourcePath: String?, val targetFile: File)
+    private var pendingDeleteCount: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,11 +116,11 @@ class PhotoGridActivity : AppCompatActivity() {
         exportProgress.progress = 0
 
         lifecycleScope.launch {
-            // 将 SAF Uri 转为文件路径
-            val targetDirPath = uriToFilePath(targetDirUri)
-            val targetDir = targetDirPath?.let { File(it) }
+            val targetDir = withContext(Dispatchers.IO) {
+                androidx.documentfile.provider.DocumentFile.fromTreeUri(this@PhotoGridActivity, targetDirUri)
+            }
             if (targetDir == null || !targetDir.canWrite()) {
-                tvExportStatus.text = "❌ 无法写入目标目录，请选择其他目录"
+                tvExportStatus.text = "❌ 无法写入目标目录"
                 btnExport.isEnabled = true
                 exportProgress.visibility = View.GONE
                 return@launch
@@ -130,7 +128,7 @@ class PhotoGridActivity : AppCompatActivity() {
 
             var moved = 0
             var failed = 0
-            pendingMoveItems.clear()
+            val copiedUris = mutableListOf<Uri>()
 
             for ((index, uriStr) in toMove.withIndex()) {
                 val sourceUri = Uri.parse(uriStr)
@@ -138,95 +136,86 @@ class PhotoGridActivity : AppCompatActivity() {
 
                 try {
                     val result = withContext(Dispatchers.IO) {
-                        movePhoto(sourceUri, targetDir)
+                        moveViaSAF(sourceUri, targetDir)
                     }
-                    if (result != null) {
-                        pendingMoveItems.add(result)
+                    if (result) {
+                        copiedUris.add(sourceUri)
                         moved++
                     } else {
                         failed++
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Move error for $uriStr", e)
+                    Log.e(TAG, "Move error", e)
                     failed++
                 }
 
                 exportProgress.progress = index + 1
             }
 
-            // 如果有需要通过 MediaStore 删除的项（renameTo 成功的不需要）
-            val needDelete = pendingMoveItems.filter { it.sourcePath == null }
-            val renamed = pendingMoveItems.filter { it.sourcePath != null }
-
-            if (needDelete.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                tvExportStatus.text = "等待确认删除 ${needDelete.size} 张原图..."
-                requestDeleteOriginals(needDelete.map { it.sourceUri }, moved, failed, renamed.size)
+            // 删除原图（通过 MediaStore.createDeleteRequest）
+            if (copiedUris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                tvExportStatus.text = "等待确认删除 ${copiedUris.size} 张原图..."
+                requestDeleteOriginals(copiedUris, moved, failed)
             } else {
-                finishExport(moved, failed, renamedOnly = renamed.size, deleted = false)
+                finishExport(moved, failed, deleted = false)
             }
         }
     }
 
     /**
-     * 移动单张照片
-     * 优先用 File.renameTo（保留所有文件属性，瞬间完成）
-     * 如果源路径不可知（content:// URI 无法获取文件路径），退回复制+删除
+     * 通过 SAF API 移动照片：用 DocumentFile 创建目标文件 + contentResolver 复制内容
+     * 复制完成后标记原图待删除
      */
-    private fun movePhoto(sourceUri: Uri, targetDir: File): MoveItem? {
-        // 获取文件名
+    private fun moveViaSAF(sourceUri: Uri, targetDir: androidx.documentfile.provider.DocumentFile): Boolean {
         val fileName = getFileName(sourceUri) ?: "photo_${System.currentTimeMillis()}.jpg"
-        val targetFile = File(targetDir, fileName)
 
-        // 防止重名覆盖
-        var finalTarget = targetFile
+        // 防重名
+        var targetFile = targetDir.findFile(fileName)
+        var finalName = fileName
         var counter = 1
-        while (finalTarget.exists()) {
+        while (targetFile != null && targetFile.exists()) {
             val dotIdx = fileName.lastIndexOf('.')
             val base = if (dotIdx > 0) fileName.substring(0, dotIdx) else fileName
             val ext = if (dotIdx > 0) fileName.substring(dotIdx) else ""
-            finalTarget = File(targetDir, "${base}_$counter$ext")
+            finalName = "${base}_$counter$ext"
+            targetFile = targetDir.findFile(finalName)
             counter++
         }
 
-        // 尝试获取源文件的真实路径（MediaStore.DATA 列）
-        val sourcePath = getRealPathFromUri(sourceUri)
+        val targetDoc = targetDir.createFile("image/*", finalName) ?: return false
 
-        if (sourcePath != null) {
-            val sourceFile = File(sourcePath)
-            if (sourceFile.exists() && sourceFile.renameTo(finalTarget)) {
-                // renameTo 成功 = 完美移动，属性全部保留
-                Log.i(TAG, "Moved via renameTo: $sourcePath -> ${finalTarget.absolutePath}")
-                return MoveItem(sourceUri, sourcePath, finalTarget)
-            }
-        }
-
-        // 退回：复制 + 标记待删除
-        val copied = copyFile(sourceUri, finalTarget)
-        return if (copied) {
-            Log.i(TAG, "Copied (will delete later): $sourceUri -> ${finalTarget.absolutePath}")
-            MoveItem(sourceUri, null, finalTarget)  // sourcePath=null 表示需要后续删除
-        } else null
-    }
-
-    private fun getRealPathFromUri(uri: Uri): String? {
+        // 复制内容
         return try {
-            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DATA), null, null, null)?.use {
-                if (it.moveToFirst()) it.getString(0) else null
+            contentResolver.openInputStream(sourceUri)?.use { input ->
+                contentResolver.openOutputStream(targetDoc.uri)?.use { output ->
+                    input.copyTo(output)
+                }
             }
-        } catch (e: Exception) { null }
+            // 尝试保留原始时间戳（通过 ContentResolver 设置）
+            // DocumentFile 不支持直接设置时间戳，但 MediaStore 会保留 EXIF
+            Log.i(TAG, "Copied via SAF: $sourceUri -> $finalName")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "SAF copy failed", e)
+            targetDoc.delete()  // 清理失败的文件
+            false
+        }
     }
 
     // ── 删除原图（仅对无法 renameTo 的文件）──
 
-    private fun requestDeleteOriginals(uris: List<Uri>, moved: Int, failed: Int, renamed: Int) {
+    private fun requestDeleteOriginals(uris: List<Uri>, moved: Int, failed: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 val deleteRequest = MediaStore.createDeleteRequest(contentResolver, uris)
                 startIntentSenderForResult(deleteRequest.intentSender, 200, null, 0, 0, 0)
             } catch (e: Exception) {
                 Log.e(TAG, "Delete request failed", e)
-                finishExport(moved, failed, renamedOnly = renamed, deleted = false)
+                finishExport(moved, failed, deleted = false)
             }
+        } else {
+            for (uri in uris) { try { contentResolver.delete(uri, null, null) } catch (_: Exception) {} }
+            finishExport(moved, failed, deleted = true)
         }
     }
 
@@ -234,22 +223,20 @@ class PhotoGridActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 200) {
             val deleted = resultCode == Activity.RESULT_OK
-            finishExport(pendingMoveItems.size, 0, renamedOnly = 0, deleted = deleted)
+            finishExport(pendingDeleteCount, 0, deleted = deleted)
         }
     }
 
-    private fun finishExport(moved: Int, failed: Int, renamedOnly: Int, deleted: Boolean) {
+    private fun finishExport(moved: Int, failed: Int, deleted: Boolean) {
         btnExport.isEnabled = true
         exportProgress.visibility = View.GONE
 
         tvExportStatus.text = buildString {
-            appendLine("✅ 移动完成: ${moved} 张")
-            if (renamedOnly > 0) appendLine("  (其中 $renamedOnly 张直接移动，属性完整保留)")
-            if (deleted) appendLine("  原图已删除")
+            appendLine("✅ 移动完成: $moved 张")
+            if (deleted) appendLine("🗑 原图已删除") else appendLine("📋 原图保留（仅复制）")
             if (failed > 0) appendLine("❌ 失败: $failed 张")
         }
-
-        Toast.makeText(this, "已移动 $moved 张照片", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, if (deleted) "已移动 $moved 张照片" else "已复制 $moved 张", Toast.LENGTH_LONG).show()
     }
 
     // ── 工具 ──
