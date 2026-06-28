@@ -1,0 +1,22 @@
+# Android
+*.apk
+*.aab
+*.dex
+*.class
+*.iml
+.gradle/
+build/
+local.properties
+*.keystore
+*.jks
+
+# IDE
+.idea/
+*.swp
+.DS_Store
+
+# TFLite model (too large for git)
+*.tflite
+
+# Build outputs
+app/build/
