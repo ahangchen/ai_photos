@@ -15,8 +15,8 @@ local.properties
 *.swp
 .DS_Store
 
-# TFLite model (too large for git)
-*.tflite
+# TFLite model (include in this repo)
+# *.tflite
 
 # Build outputs
 app/build/
