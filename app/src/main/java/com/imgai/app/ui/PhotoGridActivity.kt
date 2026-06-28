@@ -1,8 +1,6 @@
 package com.imgai.app.ui
 
 import android.app.Activity
-import android.app.RecoverableSecurityException
-import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -32,11 +30,6 @@ import java.io.File
 
 /**
  * 照片网格页 — 展示某分类/人物下的所有照片，支持导出到文件夹（移动）
- *
- * Intent extras:
- *   title: String   — 标题
- *   type: String    — "cluster" 或 "category"
- *   id: Long        — clusterId 或 categoryId
  */
 class PhotoGridActivity : AppCompatActivity() {
 
@@ -49,8 +42,9 @@ class PhotoGridActivity : AppCompatActivity() {
     private lateinit var adapter: PhotoAdapter
 
     private var photoUris: List<String> = emptyList()
-    private var pendingExportDir: Uri? = null
-    private var pendingDeleteUris: MutableList<Uri> = mutableListOf()
+    private var pendingMoveItems: MutableList<MoveItem> = mutableListOf()
+
+    data class MoveItem(val sourceUri: Uri, val sourcePath: String?, val targetFile: File)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,10 +68,7 @@ class PhotoGridActivity : AppCompatActivity() {
         adapter = PhotoAdapter()
         rvPhotos.adapter = adapter
 
-        btnExport.setOnClickListener {
-            pickExportDirectory()
-        }
-
+        btnExport.setOnClickListener { pickExportDirectory() }
         loadPhotos(type, id)
     }
 
@@ -86,16 +77,11 @@ class PhotoGridActivity : AppCompatActivity() {
             val db = AppDatabase.get(this@PhotoGridActivity)
             photoUris = withContext(Dispatchers.IO) {
                 when (type) {
-                    "cluster" -> {
-                        db.faceEmbeddingDao().getByCluster(id).map { it.imageUri }.distinct()
-                    }
-                    "category" -> {
-                        db.photoDao().getByCategory(id).map { it.uri }
-                    }
+                    "cluster" -> db.faceEmbeddingDao().getByCluster(id).map { it.imageUri }.distinct()
+                    "category" -> db.photoDao().getByCategory(id).map { it.uri }
                     else -> emptyList()
                 }
             }
-
             tvCount.text = "${photoUris.size} 张"
             btnExport.visibility = if (photoUris.isNotEmpty()) View.VISIBLE else View.GONE
             adapter.submitList(photoUris)
@@ -108,13 +94,11 @@ class PhotoGridActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
-            // 持久化权限
             contentResolver.takePersistableUriPermission(
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-            pendingExportDir = uri
-            startExport()
+            startMove(uri)
         }
     }
 
@@ -123,59 +107,125 @@ class PhotoGridActivity : AppCompatActivity() {
         pickDirLauncher.launch(null)
     }
 
-    private fun startExport() {
-        val targetDir = pendingExportDir ?: return
-        val toExport = photoUris.toList()
-        if (toExport.isEmpty()) return
+    private fun startMove(targetDirUri: Uri) {
+        val toMove = photoUris.toList()
+        if (toMove.isEmpty()) return
 
         btnExport.isEnabled = false
         exportProgress.visibility = View.VISIBLE
         tvExportStatus.visibility = View.VISIBLE
-        exportProgress.max = toExport.size
+        exportProgress.max = toMove.size
         exportProgress.progress = 0
 
         lifecycleScope.launch {
-            val copiedUris = mutableListOf<Uri>()
-            var success = 0
-            var failed = 0
+            // 将 SAF Uri 转为文件路径
+            val targetDirPath = uriToFilePath(targetDirUri)
+            val targetDir = targetDirPath?.let { File(it) }
+            if (targetDir == null || !targetDir.canWrite()) {
+                tvExportStatus.text = "❌ 无法写入目标目录，请选择其他目录"
+                btnExport.isEnabled = true
+                exportProgress.visibility = View.GONE
+                return@launch
+            }
 
-            for ((index, uriStr) in toExport.withIndex()) {
+            var moved = 0
+            var failed = 0
+            pendingMoveItems.clear()
+
+            for ((index, uriStr) in toMove.withIndex()) {
                 val sourceUri = Uri.parse(uriStr)
-                tvExportStatus.text = "移动中: ${index + 1}/${toExport.size}"
+                tvExportStatus.text = "移动中: ${index + 1}/${toMove.size}"
 
                 try {
-                    // 1. 获取文件名
-                    val fileName = getFileName(sourceUri) ?: "photo_${System.currentTimeMillis()}.jpg"
-
-                    // 2. 在目标目录创建文件
-                    val targetUri = withContext(Dispatchers.IO) {
-                        val docDir = androidx.documentfile.provider.DocumentFile.fromTreeUri(this@PhotoGridActivity, targetDir)
-                        docDir?.createFile("image/*", fileName)?.uri
+                    val result = withContext(Dispatchers.IO) {
+                        movePhoto(sourceUri, targetDir)
                     }
-                    if (targetUri == null) { failed++; continue }
-
-                    // 3. 复制内容
-                    val copied = withContext(Dispatchers.IO) { copyFile(sourceUri, targetUri) }
-                    if (copied) {
-                        copiedUris.add(sourceUri)
-                        success++
+                    if (result != null) {
+                        pendingMoveItems.add(result)
+                        moved++
                     } else {
                         failed++
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Export error for $uriStr", e)
+                    Log.e(TAG, "Move error for $uriStr", e)
                     failed++
                 }
 
                 exportProgress.progress = index + 1
             }
 
-            // 4. 删除原图（需要用户确认）
-            if (copiedUris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                tvExportStatus.text = "等待确认删除原图..."
-                requestDeleteOriginals(copiedUris)
+            // 如果有需要通过 MediaStore 删除的项（renameTo 成功的不需要）
+            val needDelete = pendingMoveItems.filter { it.sourcePath == null }
+            val renamed = pendingMoveItems.filter { it.sourcePath != null }
+
+            if (needDelete.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                tvExportStatus.text = "等待确认删除 ${needDelete.size} 张原图..."
+                requestDeleteOriginals(needDelete.map { it.sourceUri }, moved, failed, renamed.size)
             } else {
-                finishExport(success, failed, deleted = false)
+                finishExport(moved, failed, renamedOnly = renamed.size, deleted = false)
+            }
+        }
+    }
+
+    /**
+     * 移动单张照片
+     * 优先用 File.renameTo（保留所有文件属性，瞬间完成）
+     * 如果源路径不可知（content:// URI 无法获取文件路径），退回复制+删除
+     */
+    private fun movePhoto(sourceUri: Uri, targetDir: File): MoveItem? {
+        // 获取文件名
+        val fileName = getFileName(sourceUri) ?: "photo_${System.currentTimeMillis()}.jpg"
+        val targetFile = File(targetDir, fileName)
+
+        // 防止重名覆盖
+        var finalTarget = targetFile
+        var counter = 1
+        while (finalTarget.exists()) {
+            val dotIdx = fileName.lastIndexOf('.')
+            val base = if (dotIdx > 0) fileName.substring(0, dotIdx) else fileName
+            val ext = if (dotIdx > 0) fileName.substring(dotIdx) else ""
+            finalTarget = File(targetDir, "${base}_$counter$ext")
+            counter++
+        }
+
+        // 尝试获取源文件的真实路径（MediaStore.DATA 列）
+        val sourcePath = getRealPathFromUri(sourceUri)
+
+        if (sourcePath != null) {
+            val sourceFile = File(sourcePath)
+            if (sourceFile.exists() && sourceFile.renameTo(finalTarget)) {
+                // renameTo 成功 = 完美移动，属性全部保留
+                Log.i(TAG, "Moved via renameTo: $sourcePath -> ${finalTarget.absolutePath}")
+                return MoveItem(sourceUri, sourcePath, finalTarget)
+            }
+        }
+
+        // 退回：复制 + 标记待删除
+        val copied = copyFile(sourceUri, finalTarget)
+        return if (copied) {
+            Log.i(TAG, "Copied (will delete later): $sourceUri -> ${finalTarget.absolutePath}")
+            MoveItem(sourceUri, null, finalTarget)  // sourcePath=null 表示需要后续删除
+        } else null
+    }
+
+    private fun getRealPathFromUri(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DATA), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+        } catch (e: Exception) { null }
+    }
+
+    // ── 删除原图（仅对无法 renameTo 的文件）──
+
+    private fun requestDeleteOriginals(uris: List<Uri>, moved: Int, failed: Int, renamed: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val deleteRequest = MediaStore.createDeleteRequest(contentResolver, uris)
+                startIntentSenderForResult(deleteRequest.intentSender, 200, null, 0, 0, 0)
+            } catch (e: Exception) {
+                Log.e(TAG, "Delete request failed", e)
+                finishExport(moved, failed, renamedOnly = renamed, deleted = false)
             }
         }
     }
@@ -184,52 +234,49 @@ class PhotoGridActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 200) {
             val deleted = resultCode == Activity.RESULT_OK
-            val successCount = pendingDeleteUris.size
-            finishExport(successCount, 0, deleted = deleted)
+            finishExport(pendingMoveItems.size, 0, renamedOnly = 0, deleted = deleted)
         }
     }
 
-    private fun requestDeleteOriginals(uris: List<Uri>) {
-        pendingDeleteUris.clear()
-        pendingDeleteUris.addAll(uris)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val deleteRequest = MediaStore.createDeleteRequest(contentResolver, uris)
-                startIntentSenderForResult(deleteRequest.intentSender, 200, null, 0, 0, 0)
-            } catch (e: Exception) {
-                Log.e(TAG, "Delete request failed", e)
-                // 删除请求失败，仍然提示用户复制成功
-                Toast.makeText(this, "原图删除失败，已保留原图", Toast.LENGTH_LONG).show()
-                finishExport(uris.size, 0, deleted = false)
-            }
-        } else {
-            // Android 10 以下直接删除
-            for (uri in uris) {
-                try { contentResolver.delete(uri, null, null) } catch (_: Exception) {}
-            }
-            finishExport(uris.size, 0, deleted = true)
-        }
-    }
-
-    private fun finishExport(success: Int, failed: Int, deleted: Boolean) {
+    private fun finishExport(moved: Int, failed: Int, renamedOnly: Int, deleted: Boolean) {
         btnExport.isEnabled = true
         exportProgress.visibility = View.GONE
 
-        val msg = buildString {
-            appendLine("✅ 复制成功: $success 张")
+        tvExportStatus.text = buildString {
+            appendLine("✅ 移动完成: ${moved} 张")
+            if (renamedOnly > 0) appendLine("  (其中 $renamedOnly 张直接移动，属性完整保留)")
+            if (deleted) appendLine("  原图已删除")
             if (failed > 0) appendLine("❌ 失败: $failed 张")
-            appendLine(if (deleted) "🗑 原图已删除（已移动）" else "📋 原图保留（仅复制）")
         }
-        tvExportStatus.text = msg
 
-        Toast.makeText(this,
-            if (deleted) "已移动 $success 张照片" else "已复制 $success 张照片",
-            Toast.LENGTH_LONG
-        ).show()
+        Toast.makeText(this, "已移动 $moved 张照片", Toast.LENGTH_LONG).show()
     }
 
-    // ── 工具方法 ──
+    // ── 工具 ──
+
+    private fun uriToFilePath(uri: Uri): String? {
+        val path = uri.path ?: return null
+        // SAF Uri 转 file path 的常见模式
+        // external-primary/Download → /sdcard/Download
+        // 或直接是 /storage/... 路径
+        return when {
+            path.startsWith("/storage/") -> path
+            path.startsWith("/sdcard/") -> path
+            else -> {
+                // 尝试从 tree URI 提取
+                val docId = android.provider.DocumentsContract.getTreeDocumentId(uri)
+                when {
+                    docId.startsWith("primary:") -> "/sdcard/${docId.substringAfter(":")}"
+                    docId.startsWith("raw:") -> docId.substringAfter("raw:")
+                    else -> {
+                        // /storage/emulated/0/ + path after :
+                        val parts = docId.split(":")
+                        if (parts.size >= 2) "/storage/emulated/0/${parts[1]}" else null
+                    }
+                }
+            }
+        }
+    }
 
     private fun getFileName(uri: Uri): String? {
         contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
@@ -238,12 +285,10 @@ class PhotoGridActivity : AppCompatActivity() {
         return uri.lastPathSegment
     }
 
-    private fun copyFile(source: Uri, target: Uri): Boolean {
+    private fun copyFile(source: Uri, target: File): Boolean {
         return try {
             contentResolver.openInputStream(source)?.use { input ->
-                contentResolver.openOutputStream(target)?.use { output ->
-                    input.copyTo(output)
-                }
+                target.outputStream().use { output -> input.copyTo(output) }
             }
             true
         } catch (e: Exception) {
@@ -255,34 +300,17 @@ class PhotoGridActivity : AppCompatActivity() {
     // ── Adapter ──
     private inner class PhotoAdapter : RecyclerView.Adapter<PhotoAdapter.VH>() {
         private val items = mutableListOf<String>()
-
-        fun submitList(uris: List<String>) {
-            items.clear()
-            items.addAll(uris)
-            notifyDataSetChanged()
-        }
-
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val view = LayoutInflater.from(parent.context)
-                .inflate(R.layout.item_photo, parent, false)
-            return VH(view)
-        }
-
+        fun submitList(uris: List<String>) { items.clear(); items.addAll(uris); notifyDataSetChanged() }
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+            VH(LayoutInflater.from(parent.context).inflate(R.layout.item_photo, parent, false))
         override fun onBindViewHolder(holder: VH, position: Int) {
-            val uri = items[position]
-            Glide.with(holder.itemView)
-                .load(Uri.parse(uri))
-                .centerCrop()
-                .into(holder.imgPhoto)
+            Glide.with(holder.itemView).load(Uri.parse(items[position])).centerCrop().into(holder.imgPhoto)
         }
-
         override fun getItemCount() = items.size
         inner class VH(view: View) : RecyclerView.ViewHolder(view) {
             val imgPhoto: ImageView = view.findViewById(R.id.imgPhoto)
         }
     }
 
-    companion object {
-        private const val TAG = "PhotoGrid"
-    }
+    companion object { private const val TAG = "PhotoGrid" }
 }
