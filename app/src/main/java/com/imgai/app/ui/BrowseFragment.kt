@@ -1,5 +1,6 @@
 package com.imgai.app.ui
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -28,7 +29,7 @@ class BrowseFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         rvCategories = view.findViewById(R.id.rvCategories)
         rvCategories.layoutManager = LinearLayoutManager(requireContext())
-        adapter = CategoryAdapter()
+        adapter = CategoryAdapter { item -> openPhotoGrid(item) }
         rvCategories.adapter = adapter
         loadData()
     }
@@ -43,7 +44,6 @@ class BrowseFragment : Fragment() {
             val db = AppDatabase.get(requireContext())
             val categories = withContext(Dispatchers.IO) { db.categoryDao().getAll() }
             val clusters = withContext(Dispatchers.IO) { db.faceClusterDao().getAll() }
-            val photoCount = withContext(Dispatchers.IO) { db.photoDao().count() }
 
             val items = mutableListOf<CategoryItem>()
 
@@ -52,14 +52,32 @@ class BrowseFragment : Fragment() {
                 val count = withContext(Dispatchers.IO) {
                     db.photoDao().getByCategory(cat.id).size
                 }
-                items.add(CategoryItem(cat.name, count, isHeader = true))
+                items.add(CategoryItem(
+                    title = cat.name,
+                    subtitle = "${count} 张",
+                    type = "category",
+                    id = cat.id,
+                    isClickable = count > 0
+                ))
             }
 
             // 人物子类
             if (clusters.isNotEmpty()) {
-                items.add(CategoryItem("── 人物明细 ──", 0, isHeader = false, isDivider = true))
+                items.add(CategoryItem(
+                    title = "── 人物明细 ──",
+                    subtitle = "",
+                    type = "divider",
+                    id = -1,
+                    isClickable = false
+                ))
                 for (cluster in clusters) {
-                    items.add(CategoryItem(cluster.label, cluster.memberCount, isHeader = false))
+                    items.add(CategoryItem(
+                        title = cluster.label,
+                        subtitle = "${cluster.memberCount} 张",
+                        type = "cluster",
+                        id = cluster.id,
+                        isClickable = true
+                    ))
                 }
             }
 
@@ -67,14 +85,27 @@ class BrowseFragment : Fragment() {
         }
     }
 
+    private fun openPhotoGrid(item: CategoryItem) {
+        if (!item.isClickable) return
+        val intent = Intent(requireContext(), PhotoGridActivity::class.java).apply {
+            putExtra("title", item.title)
+            putExtra("type", item.type)
+            putExtra("id", item.id)
+        }
+        startActivity(intent)
+    }
+
     data class CategoryItem(
-        val name: String,
-        val count: Int,
-        val isHeader: Boolean = false,
-        val isDivider: Boolean = false
+        val title: String,
+        val subtitle: String,
+        val type: String,       // category / cluster / divider
+        val id: Long,
+        val isClickable: Boolean
     )
 
-    class CategoryAdapter : RecyclerView.Adapter<CategoryAdapter.VH>() {
+    class CategoryAdapter(
+        private val onClick: (CategoryItem) -> Unit
+    ) : RecyclerView.Adapter<CategoryAdapter.VH>() {
         private val items = mutableListOf<CategoryItem>()
 
         fun submitList(newItems: List<CategoryItem>) {
@@ -83,13 +114,13 @@ class BrowseFragment : Fragment() {
             notifyDataSetChanged()
         }
 
-        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val tv = TextView(parent.context).apply {
                 layoutParams = RecyclerView.LayoutParams(
                     RecyclerView.LayoutParams.MATCH_PARENT,
                     RecyclerView.LayoutParams.WRAP_CONTENT
                 )
-                setPadding(48, 32, 48, 32)
+                setPadding(48, 36, 48, 36)
                 textSize = 16f
             }
             return VH(tv)
@@ -98,18 +129,23 @@ class BrowseFragment : Fragment() {
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
             (holder.itemView as TextView).apply {
-                text = if (item.isHeader) {
-                    "📁 ${item.name}    (${item.count})"
-                } else if (item.isDivider) {
-                    item.name
-                } else {
-                    "   👤 ${item.name}    (${item.count})"
+                text = when {
+                    item.type == "divider" -> item.title
+                    item.type == "cluster" -> "   👤 ${item.title}    ${item.subtitle}"
+                    else -> "📁 ${item.title}    ${item.subtitle}"
                 }
-                alpha = if (item.isDivider) 0.4f else 1f
+                alpha = if (item.type == "divider") 0.4f else 1f
+                isClickable = item.isClickable
+
+                setOnClickListener {
+                    if (item.isClickable) {
+                        onClick(item)
+                    }
+                }
             }
         }
 
         override fun getItemCount() = items.size
-        class VH(view: android.view.View) : RecyclerView.ViewHolder(view)
+        class VH(view: View) : RecyclerView.ViewHolder(view)
     }
 }

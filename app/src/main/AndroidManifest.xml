@@ -31,6 +31,10 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.PhotoGridActivity"
+            android:exported="false" />
+
         <receiver
             android:name=".AutoTestReceiver"
             android:exported="true">
