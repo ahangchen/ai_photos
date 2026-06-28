@@ -38,6 +38,31 @@
             android:alpha="0.5" />
     </LinearLayout>
 
+    <!-- 导出按钮 -->
+    <Button
+        android:id="@+id/btnExport"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📤 导出到文件夹"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:id="@+id/tvExportStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="16dp"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
+    <ProgressBar
+        android:id="@+id/exportProgress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="16dp"
+        android:visibility="gone" />
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvPhotos"
         android:layout_width="match_parent"
