@@ -147,15 +147,23 @@ class AutoTestService : Service() {
                 }
                 if (bitmap == null) { fileLog("  bitmap null/timeout, skip"); errors++; processed++; continue }
 
-                val faces = withTimeoutOrNull(15_000) { faceDetector.detect(bitmap) } ?: emptyList()
+                // 人脸检测和特征提取都放到后台线程，避免阻塞主线程 ANR
+                val faces = withTimeoutOrNull(15_000) {
+                    withContext(Dispatchers.Default) { faceDetector.detect(bitmap) }
+                } ?: emptyList()
                 if (faces.isEmpty()) fileLog("  no faces or timeout")
                 totalFaces += faces.size
                 for (face in faces) {
-                    val cropped = faceDetector.cropFace(bitmap, face)
-                    val aligned = faceDetector.alignFace(cropped, face)
                     if (embeddingExtractor.isReady()) {
-                        val emb = embeddingExtractor.extract(aligned)
-                        fileLog("    embedding: ${if (emb != null) "OK len=${emb.size}" else "NULL"}")
+                        // TFLite 推理放到 Default 线程
+                        val emb = withTimeoutOrNull(15_000) {
+                            withContext(Dispatchers.Default) {
+                                val cropped = faceDetector.cropFace(bitmap, face)
+                                val aligned = faceDetector.alignFace(cropped, face)
+                                embeddingExtractor.extract(aligned)
+                            }
+                        }
+                        fileLog("    embedding: ${if (emb != null) "OK len=${emb.size}" else "NULL/timeout"}")
                         if (emb != null) {
                             val r = face.boundingBox
                             db.faceEmbeddingDao().insert(FaceEmbeddingEntity(
@@ -189,7 +197,8 @@ class AutoTestService : Service() {
             fileLog("Clustering ${allEmb.size} embeddings...")
 
             val embeddings = allEmb.map { it.embeddingRaw.split(",").map { v -> v.toFloat() }.toFloatArray() }
-            val result = DBSCANClustering.cluster(embeddings, eps = 0.4f, minPts = 2)
+            fileLog("Running DBSCAN on ${embeddings.size} vectors...")
+            val result = withContext(Dispatchers.Default) { DBSCANClustering.cluster(embeddings, eps = 0.4f, minPts = 2) }
             sb.appendLine("识别人物: ${result.clusterCount}")
             sb.appendLine("噪声点: ${result.labels.count { it == -1 }}")
             fileLog("Clusters: ${result.clusterCount}, noise: ${result.labels.count { it == -1 }}")
