@@ -21,6 +21,7 @@ import com.imgai.app.detect.FaceEmbeddingExtractor
 import com.imgai.app.ui.BrowseFragment
 import com.imgai.app.ui.HomeFragment
 import com.imgai.app.ui.ReviewFragment
+import com.imgai.app.ui.VideoToGifFragment
 
 class MainActivity : AppCompatActivity() {
 
@@ -78,6 +79,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_home -> { switchFragment(HomeFragment()); true }
                 R.id.nav_browse -> { switchFragment(BrowseFragment()); true }
                 R.id.nav_review -> { switchFragment(ReviewFragment()); true }
+                R.id.nav_tool -> { switchFragment(VideoToGifFragment()); true }
                 else -> false
             }
         }
@@ -94,6 +96,14 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
         } else {
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun hasVideoPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+        } else {
+            hasPermission()
         }
     }
 
